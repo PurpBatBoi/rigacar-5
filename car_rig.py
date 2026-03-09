@@ -26,10 +26,7 @@ import re
 from math import inf
 from rna_prop_ui import rna_idprop_ui_create
 
-CUSTOM_SHAPE_LAYER = 13
-MCH_BONE_EXTENSION_LAYER = 14
-DEF_BONE_LAYER = 15
-MCH_BONE_LAYER = 31
+
 
 
 def deselect_edit_bones(ob):
@@ -53,7 +50,7 @@ def create_constraint_influence_driver(ob, cns, driver_data_path, base_influence
     targ.data_path = driver_data_path
 
     if base_influence != 1.0:
-        fmod = fcurve.modifiers[0]
+        fmod = fcurve.modifiers.new('GENERATOR') if not fcurve.modifiers else fcurve.modifiers[0]
         fmod.mode = 'POLYNOMIAL'
         fmod.poly_order = 1
         fmod.coefficients = (0, base_influence)
@@ -87,13 +84,13 @@ def create_translation_x_driver(ob, bone, driver_data_path):
     targ.data_path = driver_data_path
 
 
-def create_bone_group(pose, group_name, color_set, bone_names):
-    group = pose.bone_groups.new(name=group_name)
-    group.color_set = color_set
+def create_bone_collection(ob, group_name, color_set, bone_names):
+    coll = ob.data.collections.new(name=group_name)
     for bone_name in bone_names:
-        bone = pose.bones.get(bone_name)
+        bone = ob.data.bones.get(bone_name)
         if bone is not None:
-            bone.bone_group = group
+            coll.assign(bone)
+            bone.color.palette = color_set
 
 
 def name_range(prefix, nb=1000):
@@ -116,35 +113,34 @@ def define_custom_property(target, name, value, description=None, overridable=Tr
     rna_idprop_ui_create(target, name, default=value, description=description, overridable=overridable, min=-inf, max=inf)
 
 
-def dispatch_bones_to_armature_layers(ob):
+def dispatch_bones_to_collections(ob):
     re_mch_bone = re.compile(r'^MCH-Wheel(Brake)?\.(Ft|Bk)\.[LR](\.\d+)?$')
-    default_visible_layers = [False] * 32
+
+    def_coll = ob.data.collections.get("DEF") or ob.data.collections.new("DEF")
+    mch_coll = ob.data.collections.get("MCH") or ob.data.collections.new("MCH")
+    mch_ext_coll = ob.data.collections.get("MCH-Extension") or ob.data.collections.new("MCH-Extension")
 
     for b in ob.data.bones:
-        layers = [False] * 32
         if b.name.startswith('DEF-'):
-            layers[DEF_BONE_LAYER] = True
+            def_coll.assign(b)
         elif b.name.startswith('MCH-'):
-            layers[MCH_BONE_LAYER] = True
+            mch_coll.assign(b)
             if b.name in ('MCH-Body', 'MCH-Steering') or re_mch_bone.match(b.name):
-                layers[MCH_BONE_EXTENSION_LAYER] = True
-        else:
-            layer_num = ob.pose.bones[b.name].bone_group_index
-            layers[layer_num] = True
-            default_visible_layers[layer_num] = True
-        b.layers = layers
+                mch_ext_coll.assign(b)
 
-    ob.data.layers = default_visible_layers
+    def_coll.is_visible = False
+    mch_coll.is_visible = False
+    mch_ext_coll.is_visible = False
 
-    shape_bone_layers = [False] * 32
-    shape_bone_layers[CUSTOM_SHAPE_LAYER] = True
+    shp_coll = ob.data.collections.get("Custom Shapes") or ob.data.collections.new("Custom Shapes")
     for b in ob.pose.bones:
         if b.custom_shape:
             if b.custom_shape_transform:
                 ob.pose.bones[b.custom_shape_transform.name].custom_shape = b.custom_shape
-                ob.data.bones[b.custom_shape_transform.name].layers = shape_bone_layers
+                shp_coll.assign(ob.data.bones[b.custom_shape_transform.name])
             else:
-                ob.data.bones[b.name].layers[CUSTOM_SHAPE_LAYER] = True
+                shp_coll.assign(ob.data.bones[b.name])
+    shp_coll.is_visible = False
 
 
 class NameSuffix(object):
@@ -434,9 +430,6 @@ def generate_constraint_on_wheel_brake_bone(wheel_brake_pose_bone, wheel_pose_bo
     wheel_brake_pose_bone.lock_rotation_w = True
     wheel_brake_pose_bone.lock_scale = (True, False, False)
     wheel_brake_pose_bone.custom_shape = get_widget('WGT-CarRig.WheelBrake')
-    wheel_brake_pose_bone.bone.show_wire = True
-    wheel_brake_pose_bone.bone_group = wheel_pose_bone.bone_group
-    wheel_brake_pose_bone.bone.layers = wheel_pose_bone.bone.layers
 
     cns = wheel_brake_pose_bone.constraints.new('LIMIT_SCALE')
     cns.name = 'Brakes'
@@ -492,8 +485,8 @@ class ArmatureGenerator(object):
             self.generate_constraints_on_rig()
             self.ob.display_type = 'WIRE'
 
-            self.generate_bone_groups()
-            dispatch_bones_to_armature_layers(self.ob)
+            self.generate_bone_collections()
+            dispatch_bones_to_collections(self.ob)
         finally:
             self.ob.location += location
 
@@ -639,7 +632,7 @@ class ArmatureGenerator(object):
         suspension_ft = amt.edit_bones.new('MCH-Suspension.Ft')
         suspension_ft.head = self.dimension.suspension_front_position
         align_vector = suspension_bk.head - suspension_ft.head
-        align_vector.magnitude = 2
+        align_vector = (align_vector.normalized() * 2)
         suspension_ft.tail = self.dimension.suspension_front_position + align_vector
         suspension_ft.use_deform = False
         suspension_ft.parent = base_bone_parent
@@ -801,7 +794,6 @@ class ArmatureGenerator(object):
         root.lock_scale = (True, True, True)
         root.custom_shape = get_widget('WGT-CarRig.Root')
         root.custom_shape_transform = pose.bones['SHP-Root']
-        root.bone.show_wire = True
 
         for ground_sensor_axle_name in ('GroundSensor.Axle.Ft', 'GroundSensor.Axle.Bk'):
             groundsensor_axle = pose.bones.get(ground_sensor_axle_name)
@@ -812,7 +804,6 @@ class ArmatureGenerator(object):
                 groundsensor_axle.custom_shape = get_widget('WGT-CarRig.GroundSensor.Axle')
                 groundsensor_axle.lock_rotation_w = True
                 groundsensor_axle.custom_shape_transform = pose.bones['SHP-%s' % groundsensor_axle.name]
-                groundsensor_axle.bone.show_wire = True
                 self.generate_ground_projection_constraint(groundsensor_axle)
 
                 if groundsensor_axle.name == 'GroundSensor.Axle.Ft' and 'GroundSensor.Axle.Bk' in pose.bones:
@@ -841,14 +832,12 @@ class ArmatureGenerator(object):
         drift.rotation_mode = 'ZYX'
         drift.custom_shape = get_widget('WGT-CarRig.DriftHandle')
         drift.custom_shape_transform = pose.bones['SHP-Drift']
-        drift.bone.show_wire = True
 
         suspension = pose.bones['Suspension']
         suspension.lock_rotation = (True, True, True)
         suspension.lock_scale = (True, True, True)
         suspension.lock_rotation_w = True
         suspension.custom_shape = get_widget('WGT-CarRig.Suspension')
-        suspension.bone.show_wire = True
 
         steering = pose.bones.get('Steering')
         if steering is not None:
@@ -857,7 +846,6 @@ class ArmatureGenerator(object):
             steering.lock_scale = (True, True, True)
             steering.lock_rotation_w = True
             steering.custom_shape = get_widget('WGT-CarRig.Steering')
-            steering.bone.show_wire = True
 
             mch_steering_rotation = pose.bones['MCH-Steering.rotation']
             mch_steering_rotation.rotation_mode = 'QUATERNION'
@@ -1026,7 +1014,6 @@ class ArmatureGenerator(object):
         ground_sensor.lock_scale = (True, True, True)
         ground_sensor.custom_shape = get_widget('WGT-CarRig.GroundSensor')
         ground_sensor.custom_shape_transform = pose.bones['SHP-%s' % ground_sensor.name]
-        ground_sensor.bone.show_wire = True
 
         if name_suffix.is_front:
             cns = ground_sensor.constraints.new('COPY_ROTATION')
@@ -1064,7 +1051,6 @@ class ArmatureGenerator(object):
         wheel.lock_rotation = (False, True, True)
         wheel.lock_scale = (True, True, True)
         wheel.custom_shape = get_widget('WGT-CarRig.Wheel')
-        wheel.bone.show_wire = True
 
         wheel_brake = pose.bones.get(name_suffix.name('WheelBrake'))
         if wheel_brake:
@@ -1127,7 +1113,6 @@ class ArmatureGenerator(object):
             wheel_damper.lock_rotation_w = True
             wheel_damper.lock_scale = (True, True, True)
             wheel_damper.custom_shape = get_widget('WGT-CarRig.WheelDamper')
-            wheel_damper.bone.show_wire = True
 
         mch_ground_sensor = pose.bones.get(wheel_dimension.name('MCH-GroundSensor'))
         if mch_ground_sensor is not None:
@@ -1147,22 +1132,22 @@ class ArmatureGenerator(object):
                     targ.transform_space = 'LOCAL_SPACE'
                     targ.transform_type = 'LOC_Z'
 
-    def generate_bone_groups(self):
-        pose = self.ob.pose
-        create_bone_group(pose, 'Direction', color_set='THEME04', bone_names=('Root', 'Drift', 'SHP-Root', 'SHP-Drift'))
-        create_bone_group(pose, 'Suspension', color_set='THEME09', bone_names=('Suspension', 'WheelDamper.Ft.L', 'WheelDamper.Ft.R', 'WheelDamper.Bk.L', 'WheelDamper.Bk.R'))
+    def generate_bone_collections(self):
+        ob = self.ob
+        create_bone_collection(ob, 'Direction', color_set='THEME04', bone_names=('Root', 'Drift', 'SHP-Root', 'SHP-Drift'))
+        create_bone_collection(ob, 'Suspension', color_set='THEME09', bone_names=('Suspension', 'WheelDamper.Ft.L', 'WheelDamper.Ft.R', 'WheelDamper.Bk.L', 'WheelDamper.Bk.R'))
 
         wheel_widgets = ('Steering',)
         for wheel_dimension in self.dimension.wheels_dimensions:
             wheel_widgets += tuple(wheel_dimension.names('Wheel'))
             wheel_widgets += tuple(wheel_dimension.names('WheelBrake'))
-        create_bone_group(pose, 'Wheel', color_set='THEME03', bone_names=wheel_widgets)
+        create_bone_collection(ob, 'Wheel', color_set='THEME03', bone_names=wheel_widgets)
 
         ground_sensor_names = ('GroundSensor.Axle.Ft', 'GroundSensor.Axle.Bk', 'SHP-GroundSensor.Axle.Ft', 'SHP-GroundSensor.Axle.Bk')
         for wheel_dimension in self.dimension.wheels_dimensions:
             ground_sensor_names += tuple(wheel_dimension.names('GroundSensor'))
         ground_sensor_names += tuple("SHP-%s" % i for i in ground_sensor_names)
-        create_bone_group(pose, 'GroundSensor', color_set='THEME02', bone_names=ground_sensor_names)
+        create_bone_collection(ob, 'GroundSensor', color_set='THEME02', bone_names=ground_sensor_names)
 
     def set_origin(self, scene):
         object_location = self.ob.location[:]
